@@ -1,76 +1,85 @@
 # GLM-5.3-Flash NVFP4 FreeToken configuration
 
-This repository records the current live configuration of the FreeToken server on the host that runs `glm53-freetoken`.
+This repository records reproducible text-only and vision-enabled FreeToken
+configurations for GLM-5.3-Flash on an RTX PRO 5000 Blackwell.
 
-## Current service
+## Current vision service
 
-- Image: `freetoken:glm53`
-- Image digest: `sha256:955f7606a6f6cb3b1d51cf8bfd72bc5ad923c672e82810ab3e005a9a99ae33b1`
+- Container: `glm53-freetoken-mm-port8`
+- Image: `freetoken-glm53-mm:port8`
 - FreeToken API version: `0.1.2`
-- Container: `glm53-freetoken`
 - Model: `/mnt/4tb/models-glm53-mixed`
-- Served model name: `glm-5.3-flash-nvfp4`
-- Bind address: `0.0.0.0:8000`
+- Served model: `glm-5.3-flash-freetoken-image-test`
+- Endpoint: `http://127.0.0.1:8000/v1`
 - GPU: device `0`
-- Container started: `2026-09-02T22:12:52Z`
+- Vision: enabled with `FREETOKEN_LOAD_VISION=1`
+- Launcher: [`start-freetoken-glm53-flash-vision.sh`](start-freetoken-glm53-flash-vision.sh)
 
-The API exposes `/v1/models`, `/v1/chat/completions`, and `/health`. The health endpoint reports the service as `serving`.
+The vision bridge loads the GLM-5 visual encoder from the checkpoint, accepts
+image URLs/data URIs in OpenAI-style message content, converts them to vision
+embeddings, and expands the image marker into language-model placeholder
+tokens. Text-only requests continue to use the normal decode path.
 
-## Launch command
+## Optimized launch settings
 
-The reproducible launcher is [`start-freetoken-glm53-flash.sh`](start-freetoken-glm53-flash.sh). Its defaults match the live container:
-
-```bash
-sudo docker run -d \
-  --name glm53-freetoken --init --ipc=host --cap-add=SYS_NICE \
-  --ulimit memlock=-1 --ulimit stack=67108864 \
-  --ulimit nofile=1048576:1048576 --runtime=nvidia --gpus device=0 \
-  -v /mnt/4tb/freetoken-glm53-cache:/root/.cache:rw \
-  -v /mnt/4tb/models-glm53-mixed:/mnt/4tb/models-glm53-mixed:ro \
-  -v /mnt/4tb/huggingface/hub:/mnt/4tb/huggingface/hub:ro \
-  -e HF_HUB_OFFLINE=1 -e SAFETENSORS_FAST_GPU=1 \
-  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
-  -e FREETOKEN_GLM_ATTN_FP8=0 -e FREETOKEN_GLM_MLP_FP8=0 \
-  -p 8000:8000 freetoken:glm53 serve \
-  --model /mnt/4tb/models-glm53-mixed \
-  --served-model-name glm-5.3-flash-nvfp4 \
-  --host 0.0.0.0 --port 8000 --gpu 0 \
-  --memory-ratio 0.94 --dtype bfloat16 \
-  --max-seq-len-override 819200 \
-  --num-tokens 1638400 --kv-reserve-tokens 1638400 \
-  --max-running-requests 4 --cuda-graph-max-bs 4 \
-  --max-prefill-length 8192 --cache-type radix \
-  --moe-backend auto --moe-cache-auto --moe-cpu-threads 28 \
-  --moe-hybrid-max-fetch -1 --nvfp4-backend auto \
-  --tool-call-parser glm47 --reasoning-parser glm \
-  --sampling-defaults model --enable-cache-report
+```text
+--num-tokens 1638400
+--kv-reserve-tokens 1638400
+--max-running-requests 4
+--cuda-graph-max-bs 4
+--moe-backend hybrid
+--moe-cache-auto
+--moe-cpu-threads 28
+--moe-hybrid-max-fetch -1
+--nvfp4-backend auto
 ```
 
-## Runtime settings
+`--moe-hybrid-max-fetch -1` uses the GPU-specific `ft bench bw` profile in
+`/root/.cache/freetoken/benchbw/`. On this machine it selects a 19.2% PCIe
+fetch fraction and computes the remaining expert misses on the CPU. The cache
+mount uses `/mnt/4tb/freetoken-glm53-cache`, containing the profile for GPU
+UUID `GPU-4bc146b6-b136-ab90-52c8-36923f404b73`.
 
 | Setting | Value |
 |---|---|
 | Data type | `bfloat16` |
-| KV capacity reservation | `1,638,400` tokens (1.6M) |
-| Maximum model context | `819,200` tokens |
-| Maximum concurrent requests | `4` |
-| CUDA graph maximum batch size | `4` |
-| Maximum prefill length | `8,192` |
-| GPU memory ratio | `0.94` |
-| KV/cache type | `radix` |
-| Cache reporting | enabled |
-| MoE backend | `auto` |
-| MoE cache | enabled (`--moe-cache-auto`) |
-| MoE CPU threads | `28` |
-| MoE hybrid max fetch | `-1` |
-| NVFP4 backend | `auto` |
-| Attention FP8 override | disabled (`0`) |
-| MLP FP8 override | disabled (`0`) |
+| KV reservation | 1,638,400 tokens / 1.6M |
+| Maximum model context | 819,200 tokens |
+| Maximum concurrent requests | 4 |
+| CUDA graph maximum batch | 4 |
+| Maximum prefill length | 8,192 |
+| GPU memory ratio | 0.94 |
+| Cache type | `radix` |
+| MoE CPU threads | 28 |
 | Tool-call parser | `glm47` |
 | Reasoning parser | `glm` |
-| Sampling defaults | model-defined |
+| Attention/MLP FP8 overrides | disabled (`0`) |
 
-No explicit `--kv-cache-dtype` override is active in the live command.
+## Benchmark results
+
+Source: `glm53_flash_ft_vision_full_2.json`, measured 2026-09-04 with
+`llm-decode-bench` v0.4.34, 30 seconds per cell, 8,192 maximum output
+tokens, using OpenAI streaming measurement. Prometheus metrics were
+unavailable, so aggregate throughput comes from streamed output tokens.
+
+Aggregate decode throughput in tokens/second:
+
+| Context | C=1 | C=2 | C=4 |
+|---:|---:|---:|---:|
+| 0 | 33.75 | 49.95 | 69.13 |
+| 8k | 32.60 | 48.58 | 65.10 |
+| 16k | 32.79 | 48.13 | 67.39 |
+| 32k | 32.75 | 47.97 | 62.87 |
+| 64k | 32.97 | 50.02 | 61.31 |
+
+At 32k context, the single-user result was **32.75 tok/s** and the
+concurrency-4 result was **62.87 aggregate tok/s**. Single-user TTFT was
+approximately 3.0 seconds across the matrix.
+
+For comparison, the earlier vision configuration that resolved `auto` to the
+offload backend measured 18.44 tok/s at 32k. Explicit hybrid with the
+bandwidth profile restored performance to approximately 32.7 tok/s, within
+measurement noise of the prior non-vision hybrid configuration.
 
 ## Storage and environment
 
@@ -85,26 +94,27 @@ Active environment overrides:
 ```text
 HF_HUB_OFFLINE=1
 SAFETENSORS_FAST_GPU=1
+FREETOKEN_LOAD_VISION=1
+FREETOKEN_VISION_MODEL_PATH=/mnt/4tb/models-glm53-mixed
 CUDA_DEVICE_ORDER=PCI_BUS_ID
 FREETOKEN_GLM_ATTN_FP8=0
 FREETOKEN_GLM_MLP_FP8=0
 ```
 
-The container also reports CUDA `13.0.1`, `TORCH_CUDA_ARCH_LIST=12.0`, `TVM_FFI_CUDA_ARCH_LIST=12.0`, `MAX_JOBS=32`, and `CMAKE_BUILD_PARALLEL_LEVEL=32`.
-
-## Observed operation
-
-At capture time the service was healthy and serving requests. Logs showed radix-cache hits, including a prefill with `184,576` cached tokens, two running requests, an empty request queue, and approximately `40` decode tokens/second in that sample. These are observations, not guaranteed performance figures.
-
-The host snapshot showed an RTX PRO 5000 Blackwell with 73,415 MiB total VRAM and approximately 72,762 MiB allocated while serving. Host memory had approximately 386 GiB available. VRAM and RAM usage vary with workload.
-
-## Start
+## Starting the vision service
 
 ```bash
-chmod +x start-freetoken-glm53-flash.sh
-./start-freetoken-glm53-flash.sh
+chmod +x start-freetoken-glm53-flash-vision.sh
+./start-freetoken-glm53-flash-vision.sh
 ```
 
-The launcher supports `FREETOKEN_PORT`, `FREETOKEN_IMAGE`, `FREETOKEN_CONTAINER`, `FREETOKEN_MODEL_DIR`, `FREETOKEN_HF_HUB_DIR`, and `FREETOKEN_CACHE_DIR` overrides. It refuses to replace an existing container.
+The launcher refuses to replace an existing container. It supports
+`FREETOKEN_IMAGE_TEST_IMAGE`, `FREETOKEN_IMAGE_TEST_CONTAINER`,
+`FREETOKEN_IMAGE_TEST_MODEL_DIR`, `FREETOKEN_IMAGE_TEST_HF_HUB_DIR`,
+`FREETOKEN_IMAGE_TEST_CACHE_DIR`, and `FREETOKEN_IMAGE_TEST_PORT` overrides.
 
-Secrets, access tokens, prompts, and private request data are intentionally excluded.
+The original text-only launcher remains available as
+[`start-freetoken-glm53-flash.sh`](start-freetoken-glm53-flash.sh).
+
+Secrets, access tokens, prompts, and private request data are intentionally
+excluded.
